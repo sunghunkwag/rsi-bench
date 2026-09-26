@@ -6,6 +6,8 @@
 
 An open-source benchmark framework for evaluating Recursive Self-Improvement (RSI) capabilities in AI systems. RSI-Bench decomposes RSI into six measurable axes with statistical rigor, providing researchers with concrete tools to distinguish genuine self-improvement from metric gaming.
 
+**Methods note:** [How do you measure recursive self-improvement?](https://sunghunkwag.github.io/research/rsi-bench/) explains the six axes, how the harmonic-mean score behaves, and how to reproduce and cite the benchmark. For background, see [what recursive self-improvement is and how to test a claim](https://sunghunkwag.github.io/research/recursive-self-improvement/).
+
 ---
 
 ## Why This Exists
