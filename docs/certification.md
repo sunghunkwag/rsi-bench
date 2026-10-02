@@ -79,6 +79,10 @@ the `UNVERIFIABLE` wall with a reason and no rank. The label means insufficient
 evidence for this track; it does not imply fraud. Legacy JSON exports can remain
 visible there but cannot be certified without callback evidence. IDs must be
 unique; ties are sorted by ID. This is a library API, not a hosted leaderboard.
+All ranked runs must also use the same deployment-configured protocol, defaulting
+to all six axes in standard order, 50 cycles, and seed 42. Supply `protocol=` to
+choose a different comparison cohort; do not derive this policy from untrusted
+submissions. Identical evidence can enter a ranking only once.
 
 ## Usage
 
@@ -112,6 +116,8 @@ from rsi_bench.certification import rank_submissions
 rows = rank_submissions(
     [{"id": "run-001", "bundle": bundle, "receipt": receipt}],
     trusted_verifiers={"approved-verifier": approved_public_key_bytes},
+    protocol={"axes": ["smd", "itq", "odr", "mas", "ssm", "agg"],
+              "max_cycles": 50, "seed": 42},
 )
 ```
 

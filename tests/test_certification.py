@@ -150,7 +150,7 @@ def test_trusted_receipt_and_unsigned_wall(bundle, keys):
         {"id": "verified", "bundle": bundle, "receipt": receipt},
         {"id": "self-report", "bundle": bundle},
         {"id": "legacy-json", "composite_score": 0.99},
-    ], trusted)
+    ], trusted, protocol=bundle["protocol"])
     assert rows["ranked"][0]["rank"] == 1
     assert rows["ranked"][0]["status"] == "VERIFIED_REPLAY"
     assert [r["id"] for r in rows["unverifiable"]] == ["self-report", "legacy-json"]
@@ -252,3 +252,16 @@ def test_receipt_cannot_be_reused_for_a_different_protocol(bundle, keys):
     bundle["protocol"]["seed"] = 999
     with pytest.raises(ValueError, match="does not match"):
         verify_receipt(bundle, receipt, trusted)
+
+
+def test_ranking_requires_same_protocol_and_deduplicates_evidence(bundle, keys):
+    private, trusted = keys
+    receipt = issue_receipt(bundle, "independent", private)
+    submission = {"id": "first", "bundle": bundle, "receipt": receipt}
+    default_rows = rank_submissions([submission], trusted)
+    assert not default_rows["ranked"]
+    assert "ranking protocol" in default_rows["unverifiable"][0]["reason"]
+    rows = rank_submissions([submission, dict(submission, id="second")], trusted,
+                            protocol=bundle["protocol"])
+    assert len(rows["ranked"]) == 1
+    assert "Duplicate evidence" in rows["unverifiable"][0]["reason"]

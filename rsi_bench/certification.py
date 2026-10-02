@@ -296,14 +296,19 @@ def verify_receipt(bundle, receipt, trusted_verifiers):
         raise ValueError("Invalid receipt") from exc
 
 
-def rank_submissions(submissions, trusted_verifiers):
+def rank_submissions(submissions, trusted_verifiers, protocol=None):
     """Return receipt-only ranks and a visible UNVERIFIABLE wall.
 
     Each submission has an ID, bundle, and optional receipt. Missing/invalid
-    receipts, partial runs, and mismatched claims never receive a rank.
+    receipts, partial runs, and mismatched claims never receive a rank. Every
+    ranked run must use the deployment's protocol (default: 50 cycles, seed 42,
+    six axes in standard order); evidence cannot choose its own ranking policy.
     """
     ranked, wall = [], []
     seen = set()
+    seen_bundles = set()
+    protocol = _protocol(list(AXES), 50, 42) if protocol is None else _protocol(
+        protocol["axes"], protocol["max_cycles"], protocol["seed"])
     for submission in submissions:
         identity = submission["id"]
         if type(identity) is not str or not identity or identity in seen:
@@ -327,11 +332,17 @@ def rank_submissions(submissions, trusted_verifiers):
             row.update(report)
             if not report["eligible"]:
                 raise ValueError("All six axes and composite must be recomputable")
+            if submission["bundle"]["protocol"] != protocol:
+                raise ValueError("Run does not match the ranking protocol")
+            if report["bundle_sha256"] in seen_bundles:
+                raise ValueError("Duplicate evidence already ranked")
         except (ValueError, KeyError) as exc:
+            row["eligible"] = False
             row["reason"] = str(exc)
             wall.append(row)
             continue
         row["status"] = "VERIFIED_REPLAY"
+        seen_bundles.add(report["bundle_sha256"])
         ranked.append(row)
     ranked.sort(key=lambda row: (-row["adjusted_score"], row["id"]))
     for rank, row in enumerate(ranked, 1):
