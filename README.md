@@ -154,6 +154,21 @@ composite = scorer.compute_from_dict(axis_scores)
 
 ## Extending RSI-Bench
 
+### Optional certification pilot
+
+An opt-in [certification track](docs/certification.md) records interface callback
+evidence, replays all six axes, and produces Ed25519-signed audit receipts.
+`rank_submissions()` ranks complete runs with receipts from explicitly trusted
+verifiers; other submissions remain visible as `UNVERIFIABLE`. Integrity and its
+adjusted score are separate from the existing RSI score. Replay attests that
+scores follow from the recorded observations; independent measurement is still
+required to establish that those observations are true.
+
+```bash
+pip install -e '.[certification]'
+python examples/certification_pilot.py
+```
+
 ### Custom Tasks
 
 ```python
