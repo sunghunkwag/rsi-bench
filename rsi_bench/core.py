@@ -119,7 +119,7 @@ class RSIBenchmark:
 
         results = BenchmarkResults(
             system_name=self.system.name,
-            config={"max_cycles": max_cycles, "seed": seed or self.seed},
+            config={"max_cycles": max_cycles, "seed": self.seed if seed is None else seed},
         )
         total_start = time.time()
 

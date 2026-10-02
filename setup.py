@@ -20,6 +20,7 @@ setup(
                 "sortedcontainers>=2.4.0",
       ],
       extras_require={
+                "certification": ["cryptography>=41.0"],
                 "dev": ["pytest>=7.0", "pytest-cov>=4.0", "black", "flake8", "mypy"],
                 "viz": ["matplotlib>=3.5.0", "seaborn>=0.12.0"],
       },
