@@ -14,6 +14,9 @@ import numpy as np
 from rsi_bench.scoring import UnifiedScorer
 
 
+EVALUATION_PROTOCOL = "rsi-bench-evaluation-v2"
+
+
 @dataclass
 class SystemInterface:
     """Interface contract for systems under evaluation."""
@@ -95,11 +98,19 @@ class RSIBenchmark:
         "Autonomous Goal Generation (AGG)",
     ]
 
-    def __init__(self, axes=None, seed=42):
+    def __init__(self, axes=None, seed=42, goal_verifier=None, goal_verifier_id=None):
+        if goal_verifier is not None and not callable(goal_verifier):
+            raise ValueError("goal_verifier must be callable")
+        if ((goal_verifier is None) != (goal_verifier_id is None) or
+                (goal_verifier_id is not None and
+                 (type(goal_verifier_id) is not str or not goal_verifier_id.strip()))):
+            raise ValueError("A goal verifier and its nonempty fixture ID must be supplied together")
         self.seed = seed
         self.rng = np.random.default_rng(seed)
         self.system = None
         self.scorer = UnifiedScorer()
+        self.goal_verifier = goal_verifier
+        self.goal_verifier_id = goal_verifier_id
         self._active_axes = axes or ["smd", "itq", "odr", "mas", "ssm", "agg"]
 
     def register_system(self, name, modify_fn, evaluate_fn, get_state_fn,
@@ -119,9 +130,11 @@ class RSIBenchmark:
 
         results = BenchmarkResults(
             system_name=self.system.name,
-            config={"max_cycles": max_cycles, "seed": self.seed if seed is None else seed},
+            config={"max_cycles": max_cycles, "seed": self.seed if seed is None else seed,
+                    "evaluation_protocol": EVALUATION_PROTOCOL,
+                    "goal_verifier_id": self.goal_verifier_id},
         )
-        total_start = time.time()
+        total_start = time.perf_counter()
 
         from rsi_bench.axes import (
             SelfModificationDepth, TrajectoryQuality, OperatorDiscovery,
@@ -143,15 +156,16 @@ class RSIBenchmark:
             axis_name, axis_cls = axis_map[axis_key]
             if verbose:
                 print(f"[RSI-Bench] Evaluating {axis_name}...")
-            evaluator = axis_cls(rng=self.rng)
-            t0 = time.time()
+            evaluator = (axis_cls(rng=self.rng, goal_verifier=self.goal_verifier)
+                         if axis_key == "agg" else axis_cls(rng=self.rng))
+            t0 = time.perf_counter()
             axis_result = evaluator.evaluate(self.system, max_cycles=max_cycles)
-            axis_result.duration_seconds = time.time() - t0
+            axis_result.duration_seconds = time.perf_counter() - t0
             results.axis_results[axis_name] = axis_result
             if verbose:
                 print(f"  -> Score: {axis_result.score:.4f} ({axis_result.duration_seconds:.1f}s)")
 
-        results.total_duration = time.time() - total_start
+        results.total_duration = time.perf_counter() - total_start
         results.composite_score = self.scorer.compute(results)
         if verbose:
             print(results.summary())
@@ -172,5 +186,6 @@ class RSIBenchmark:
         }
         if axis not in axis_map:
             raise ValueError(f"Unknown axis '{axis}'. Choose from {list(axis_map)}")
-        evaluator = axis_map[axis](rng=self.rng)
+        evaluator = (axis_map[axis](rng=self.rng, goal_verifier=self.goal_verifier)
+                     if axis == "agg" else axis_map[axis](rng=self.rng))
         return evaluator.evaluate(self.system, max_cycles=max_cycles, **kwargs)

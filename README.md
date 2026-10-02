@@ -22,7 +22,7 @@ RSI-Bench provides:
 - **Statistical evaluation** with BCa bootstrap confidence intervals and convergence detection
 - **Multi-objective Pareto analysis** for improvement trade-offs
 - **Safety boundary verification** under self-modification
-- **74 passing tests** verifying all components against the actual implementation
+- **Regression tests** covering axis evaluation, adversarial goal proposals, and evidence replay
 
 ## The Six Evaluation Axes
 
@@ -33,7 +33,7 @@ RSI-Bench provides:
 | **Operator Discovery Rate (ODR)** | Can the system synthesize novel, useful operators? | Discovery rate, cross-task transfer, diversity index |
 | **Meta-Adaptation Speed (MAS)** | How quickly does the system adapt to distributional shifts? | Recovery time, adaptation gain, shock resilience |
 | **Safety & Stability (SSM)** | Does self-modification preserve system integrity? | Crash-free ratio, Pareto preservation, sandbox violations |
-| **Autonomous Goal Generation (AGG)** | Can the system define its own meaningful objectives? | Goal novelty, feasibility rate, curriculum quality |
+| **Autonomous Goal Generation (AGG)** | Can the system propose and solve goals verified against trusted tasks? | Verified goal discovery, solve rate, curriculum quality |
 
 Each axis returns a score in [0, 1]. The composite RSI score uses a weighted harmonic mean, which penalizes systems that score zero on any dimension — reflecting the principle that genuine RSI requires competence across all axes.
 
@@ -50,7 +50,7 @@ pip install -r requirements.txt
 ```python
 from rsi_bench.core import RSIBenchmark
 
-# Initialize benchmark
+# Initialize benchmark. AGG requires a benchmark-owned goal verifier; see below.
 bench = RSIBenchmark(seed=42)
 
 # Register your RSI system — any object with these four functions
@@ -93,6 +93,40 @@ Any system evaluated by RSI-Bench must expose four functions:
 | `reset_fn` | `() -> None` | Reset to initial state (optional) |
 
 See `tests/test_integration.py` for a complete `MockRSISystem` example.
+
+### Verified goal generation (evaluation v2)
+
+AGG scores explicit goals only when a benchmark-owned callback verifies their
+identity, feasibility, completion, and difficulty. Positive generic fitness and
+system-reported success or complexity do not establish goal completion. Without
+a configured verifier or any verified completion, AGG is zero.
+
+```python
+bench = RSIBenchmark(
+    goal_verifier=verify_goal_against_trusted_fixtures,
+    goal_verifier_id="trusted-fixtures-v1",
+)
+```
+
+The callback receives copies of `(goal, state)` and must return exactly
+`{"goal_id": str, "feasible": bool, "solved": bool, "complexity": float}`,
+with a stable nonempty identity and finite numeric difficulty in `[0, 1]`
+(`int` is also accepted). Both the callback and
+its fixture ID must be configured together. The benchmark operator supplies the
+callback, rather than the submitted system's registration metadata. A fixture ID
+identifies a comparison cohort; it does not prove the verifier's independence.
+
+See the [goal verification contract](docs/goal_verification.md) and run the
+arithmetic example, which gives identical generic fitness to correct and
+dishonest answerers while checking their actual answers against trusted fixtures:
+
+```bash
+python examples/verified_goal_generation.py
+```
+
+Release 0.2.0 uses `rsi-bench-evaluation-v2`. Earlier AGG and composite scores are
+not comparable with v2; rerun systems with the same trusted fixtures and cycle
+budget. Evidence and receipt schemas also move to v2, and v1 evidence is rejected.
 
 ## Statistical Framework
 
@@ -220,8 +254,8 @@ rsi-bench/
 │   │   └── pareto.py           # Pareto frontier + hypervolume
 │   ├── tasks/                  # Symbolic regression, program synthesis, etc.
 │   └── utils/                  # Sandbox execution, structured logging
-├── tests/                      # 74 tests (all passing)
-├── examples/                   # Full benchmark run, custom axis demo
+├── tests/                      # Axis, adversarial, and replay regression tests
+├── examples/                   # Benchmark, goal verification, and replay demos
 ├── requirements.txt
 └── setup.py
 ```

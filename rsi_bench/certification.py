@@ -13,12 +13,12 @@ from pathlib import Path
 
 import numpy as np
 
-from rsi_bench.core import RSIBenchmark, SystemInterface
+from rsi_bench.core import EVALUATION_PROTOCOL, RSIBenchmark, SystemInterface
 from rsi_bench.scoring import UnifiedScorer
 
 
-EVIDENCE_SCHEMA = "rsi-bench-evidence-v1"
-RECEIPT_SCHEMA = "rsi-bench-receipt-v1"
+EVIDENCE_SCHEMA = "rsi-bench-evidence-v2"
+RECEIPT_SCHEMA = "rsi-bench-receipt-v2"
 SCOPE = "interface-transcript-replay"
 AXES = tuple(UnifiedScorer.DEFAULT_WEIGHTS)
 NAMES = {key: name for name, key in UnifiedScorer.AXIS_KEY_MAP.items()}
@@ -42,8 +42,8 @@ def _json_tree(value):
 
 
 def _encode(value):
-    # Order is significant: AGG uses str(dict) to identify goals. Sorting keys
-    # would give identical digests to evidence with different replay semantics.
+    # Bind exact callback snapshots, including insertion order, so inputs
+    # observed by a verifier cannot be silently reordered after recording.
     return json.dumps(_json_tree(value), ensure_ascii=True, allow_nan=False,
                       separators=(",", ":")).encode("utf-8")
 
@@ -67,7 +67,13 @@ def _implementation():
     }
 
 
-def _protocol(axes, max_cycles, seed):
+def _protocol(axes, max_cycles, seed, goal_verifier_id=None,
+              evaluation_protocol=EVALUATION_PROTOCOL):
+    if evaluation_protocol != EVALUATION_PROTOCOL:
+        raise ValueError("Unsupported evaluation protocol")
+    if goal_verifier_id is not None and (type(goal_verifier_id) is not str or
+                                         not goal_verifier_id.strip()):
+        raise ValueError("Invalid goal verifier fixture ID")
     if (type(max_cycles) is not int or not 1 <= max_cycles <= MAX_CYCLES or
             type(seed) is not int or seed < 0):
         raise ValueError("Protocol requires positive bounded cycles and a nonnegative integer seed")
@@ -75,7 +81,9 @@ def _protocol(axes, max_cycles, seed):
             any(type(a) is not str or a not in AXES for a in axes) or
             len(set(axes)) != len(axes)):
         raise ValueError("Protocol requires distinct built-in axes")
-    return {"axes": axes, "max_cycles": max_cycles, "seed": seed}
+    return {"axes": axes, "max_cycles": max_cycles, "seed": seed,
+            "evaluation_protocol": evaluation_protocol,
+            "goal_verifier_id": goal_verifier_id}
 
 
 def _claims(results):
@@ -93,21 +101,37 @@ class _Recorder:
         self.failure = None
 
     def wrap(self, method, function):
-        def call():
+        def call(*args):
             if len(self.events) >= MAX_EVENTS:
                 self.failure = "Evidence event limit exceeded"
                 raise ValueError(self.failure)
+            event = {"method": method}
             try:
-                value = function()
+                if method == "verify_goal":
+                    event["args"] = _json_tree(list(args))
+            except (ValueError, RecursionError) as exc:
+                self.failure = "Invalid finite JSON evidence: {}".format(exc)
+                raise
+            try:
+                value = function(*args)
             except Exception:
-                self.events.append({"method": method, "error": True})
+                self.events.append(dict(event, error=True))
                 raise
             try:
                 snapshot = _json_tree(value)
-            except ValueError as exc:
-                self.failure = str(exc)
+            except (ValueError, RecursionError) as exc:
+                self.failure = "Invalid finite JSON evidence: {}".format(exc)
                 raise
-            self.events.append({"method": method, "value": snapshot})
+            if method == "verify_goal":
+                # NumPy scalar normalization must not turn a malformed raw
+                # verdict into a valid assessment during recording/replay.
+                from rsi_bench.axes.axis6_goal_generation import GoalGeneration
+                try:
+                    GoalGeneration._validate_assessment(value)
+                except ValueError:
+                    self.events.append(dict(event, error=True))
+                    raise
+            self.events.append(dict(event, value=snapshot))
             # Evaluators may mutate returned collections. Keep the archived
             # observations immutable and avoid aliasing across callback calls.
             return _json_tree(snapshot)
@@ -118,15 +142,17 @@ def record_run(benchmark, max_cycles=50, seed=None, verbose=False):
     """Return (BenchmarkResults, JSON evidence) for an opt-in built-in run.
 
     Callback values must be JSON snapshots. Ordinary benchmark.run() retains
-    its existing behavior. Custom scoring weights are outside the v1 protocol.
+    its existing behavior. Custom scoring weights are outside the v2 protocol.
     """
     if type(benchmark) is not RSIBenchmark or benchmark.system is None:
         raise ValueError("A registered built-in RSIBenchmark is required")
     if benchmark.scorer.weights != UnifiedScorer.DEFAULT_WEIGHTS:
-        raise ValueError("Certification v1 requires default scoring weights")
+        raise ValueError("Certification v2 requires default scoring weights")
     protocol = _protocol(list(benchmark._active_axes), max_cycles,
-                         benchmark.seed if seed is None else seed)
+                         benchmark.seed if seed is None else seed,
+                         benchmark.goal_verifier_id)
     original = benchmark.system
+    original_verifier = benchmark.goal_verifier
     recorder = _Recorder()
     benchmark.system = SystemInterface(
         name=original.name,
@@ -137,10 +163,13 @@ def record_run(benchmark, max_cycles=50, seed=None, verbose=False):
                   if original.reset_fn is not None else None),
         metadata=original.metadata,
     )
+    if original_verifier is not None:
+        benchmark.goal_verifier = recorder.wrap("verify_goal", original_verifier)
     try:
         results = benchmark.run(max_cycles=max_cycles, seed=protocol["seed"], verbose=verbose)
     finally:
         benchmark.system = original
+        benchmark.goal_verifier = original_verifier
     if recorder.failure:
         raise ValueError(recorder.failure)
     bundle = _json_tree({
@@ -166,12 +195,14 @@ class _Replay:
         self.events = events
         self.position = 0
 
-    def call(self, method):
+    def call(self, method, *args):
         if self.position == len(self.events):
             raise _ReplayMismatch("Truncated transcript")
         event = self.events[self.position]
         if event["method"] != method:
             raise _ReplayMismatch("Transcript callback order mismatch")
+        if method == "verify_goal" and _encode(event["args"]) != _encode(list(args)):
+            raise _ReplayMismatch("Goal verifier argument mismatch")
         self.position += 1
         if event.get("error") is True:
             raise RuntimeError("Recorded callback failure")
@@ -209,23 +240,31 @@ def recompute(bundle):
     if type(bundle["reset_available"]) is not bool:
         raise ValueError("Invalid reset availability")
     p = bundle["protocol"]
-    if type(p) is not dict or set(p) != {"axes", "max_cycles", "seed"}:
+    protocol_fields = {"axes", "max_cycles", "seed", "evaluation_protocol", "goal_verifier_id"}
+    if type(p) is not dict or set(p) != protocol_fields:
         raise ValueError("Unsupported protocol")
-    _protocol(p["axes"], p["max_cycles"], p["seed"])
+    _protocol(p["axes"], p["max_cycles"], p["seed"], p["goal_verifier_id"], p["evaluation_protocol"])
     events = bundle["events"]
     if type(events) is not list or len(events) > MAX_EVENTS:
         raise ValueError("Invalid transcript size")
     for e in events:
-        if (type(e) is not dict or e.get("method") not in ("modify", "evaluate", "state", "reset") or
-                not (set(e) == {"method", "value"} or
-                     (set(e) == {"method", "error"} and e["error"] is True))):
+        if type(e) is not dict or e.get("method") not in ("modify", "evaluate", "state", "reset", "verify_goal"):
+            raise ValueError("Malformed transcript event")
+        fields = {"method", "args"} if e["method"] == "verify_goal" else {"method"}
+        if (not (set(e) == fields | {"value"} or
+                 (set(e) == fields | {"error"} and e["error"] is True)) or
+                ("args" in fields and (type(e["args"]) is not list or len(e["args"]) != 2))):
             raise ValueError("Malformed transcript event")
     claimed = bundle["claims"]
     if (type(claimed) is not dict or set(claimed) != {"axes", "composite_score"} or
             type(claimed["axes"]) is not dict or set(claimed["axes"]) - set(AXES)):
         raise ValueError("Unsupported claims")
     replay = _Replay(events)
-    bench = RSIBenchmark(axes=p["axes"], seed=p["seed"])
+    bench = RSIBenchmark(
+        axes=p["axes"], seed=p["seed"], goal_verifier_id=p["goal_verifier_id"],
+        goal_verifier=(lambda goal, state: replay.call("verify_goal", goal, state))
+        if p["goal_verifier_id"] is not None else None,
+    )
     bench.register_system(
         bundle["system_name"], lambda: replay.call("modify"),
         lambda: replay.call("evaluate"), lambda: replay.call("state"),
@@ -307,8 +346,12 @@ def rank_submissions(submissions, trusted_verifiers, protocol=None):
     ranked, wall = [], []
     seen = set()
     seen_bundles = set()
+    if protocol is not None and (type(protocol) is not dict or set(protocol) != {
+            "axes", "max_cycles", "seed", "evaluation_protocol", "goal_verifier_id"}):
+        raise ValueError("Unsupported ranking protocol")
     protocol = _protocol(list(AXES), 50, 42) if protocol is None else _protocol(
-        protocol["axes"], protocol["max_cycles"], protocol["seed"])
+        protocol["axes"], protocol["max_cycles"], protocol["seed"],
+        protocol["goal_verifier_id"], protocol["evaluation_protocol"])
     for submission in submissions:
         identity = submission["id"]
         if type(identity) is not str or not identity or identity in seen:
